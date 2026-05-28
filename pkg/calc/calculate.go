@@ -14,20 +14,37 @@
 // agent-substrate/substrate cmd/atenet/internal/app/router/resumer.go) and
 // handles N>=3 concurrent waiters cleanly.
 //
+// IMPORTANT: a single Calculator instance must be long-lived across all tool
+// invocations for a given agent — the singleflight.Group state is what dedupes
+// concurrent same-session callers. Constructing a fresh Calculator per
+// invocation would defeat Path 2.
+//
 // ADK plumbing (SessionIDFromContext + StateStoreFromContext) is injected at
 // construction so this package has zero dependency on the ADK Go SDK; unit
-// tests run hermetically. The ADK-hosting main.go wires the real extractors:
+// tests run hermetically. The ADK-hosting main.go (in cmd/agent/) registers
+// the tool via functiontool.New from google.golang.org/adk/tool/functiontool,
+// constructs one Calculator at startup, and wires the real extractors:
 //
-//	calc.New(
-//	    func(ctx context.Context) string {
-//	        ic, _ := agent.InvocationContextFromContext(ctx)
-//	        return ic.Session().ID()
+//	c := calc.New(
+//	    func(ctx context.Context) (string, error) {
+//	        tc, ok := ctx.(tool.Context)
+//	        if !ok { return "", fmt.Errorf("calc: ctx is not tool.Context: %T", ctx) }
+//	        return tc.SessionID(), nil
 //	    },
-//	    func(ctx context.Context) calc.StateStore {
-//	        ic, _ := agent.InvocationContextFromContext(ctx)
-//	        return adkStateAdapter{ic.Session().State()}
+//	    func(ctx context.Context) (calc.StateStore, error) {
+//	        tc, ok := ctx.(tool.Context)
+//	        if !ok { return nil, fmt.Errorf("calc: ctx is not tool.Context: %T", ctx) }
+//	        return adkStateAdapter{tc.State()}, nil
 //	    },
 //	)
+//	handler := func(tc tool.Context, args calc.CalculateArgs) (calc.CalculateResult, error) {
+//	    return c.Calculate(tc, args) // tool.Context embeds context.Context
+//	}
+//	t, _ := functiontool.New(functiontool.Config{Name: "calculate", ...}, handler)
+//
+// tool.Context (from google.golang.org/adk/tool) embeds agent.ReadonlyContext
+// which embeds context.Context, AND exposes SessionID() + State() directly —
+// no need for agent.InvocationContextFromContext.
 package calc
 
 import (
@@ -55,8 +72,10 @@ type CalculateResult struct {
 }
 
 // SessionIDFromContext extracts the actor session ID from a tool-invocation
-// context. Wired by the ADK-hosting main.go.
-type SessionIDFromContext func(ctx context.Context) string
+// context. Wired by the ADK-hosting main.go. Returns an error if the context
+// cannot be unwrapped (e.g. unexpected type) so the tool surfaces a clear
+// error to the caller instead of panicking on a nil-deref or empty sid.
+type SessionIDFromContext func(ctx context.Context) (string, error)
 
 // StateStore is the minimal session-state interface the tool needs. Maps to
 // ADK Go's session.State (Get/Set methods).
@@ -66,8 +85,9 @@ type StateStore interface {
 }
 
 // StateStoreFromContext extracts the per-session state store from a
-// tool-invocation context. Wired by the ADK-hosting main.go.
-type StateStoreFromContext func(ctx context.Context) StateStore
+// tool-invocation context. Wired by the ADK-hosting main.go. Returns an error
+// for the same reason as SessionIDFromContext (symmetry, defensive boundary).
+type StateStoreFromContext func(ctx context.Context) (StateStore, error)
 
 // Calculator wraps the tool entry-point with injectable plumbing.
 type Calculator struct {
@@ -92,11 +112,20 @@ func (c *Calculator) WithWorkDuration(d time.Duration) *Calculator {
 	return c
 }
 
-// Calculate is the tool entry-point. ADK registers via tool.MustFromFunc which
-// reflects over (ctx, args) -> (result, error).
+// Calculate is the tool entry-point. The ADK-hosting main.go wraps this in a
+// (tool.Context, args) -> (result, error) handler and registers it via
+// functiontool.New[CalculateArgs, CalculateResult] from
+// google.golang.org/adk/tool/functiontool. tool.Context embeds context.Context
+// so tc passes straight through.
 func (c *Calculator) Calculate(ctx context.Context, args CalculateArgs) (CalculateResult, error) {
-	sid := c.sidFromCtx(ctx)
-	state := c.stateFromCtx(ctx)
+	sid, err := c.sidFromCtx(ctx)
+	if err != nil {
+		return CalculateResult{}, fmt.Errorf("calc: extract session id: %w", err)
+	}
+	state, err := c.stateFromCtx(ctx)
+	if err != nil {
+		return CalculateResult{}, fmt.Errorf("calc: extract state store: %w", err)
+	}
 	key := cleanCalcKey(args.Expression)
 	cacheKey := "calc:" + key
 

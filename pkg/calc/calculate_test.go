@@ -44,9 +44,11 @@ func ctxWith(sid string, st StateStore) context.Context {
 	return ctx
 }
 
-func sidFromCtx(ctx context.Context) string { return ctx.Value(sessionKey).(string) }
-func stateFromCtx(ctx context.Context) StateStore {
-	return ctx.Value(stateKey).(StateStore)
+func sidFromCtx(ctx context.Context) (string, error) {
+	return ctx.Value(sessionKey).(string), nil
+}
+func stateFromCtx(ctx context.Context) (StateStore, error) {
+	return ctx.Value(stateKey).(StateStore), nil
 }
 
 // newTestCalc builds a Calculator with a short work duration so tests run fast.
