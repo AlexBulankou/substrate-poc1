@@ -1,0 +1,49 @@
+# ActorTemplate for substrate-poc1 agent.
+#
+# Substrate's operator (`agent-substrate/substrate`) consumes this CRD and
+# spawns one Actor pod per session-id on first request, suspending idle
+# actors via runsc + CRIU checkpoint/restore (snapshotsConfig location).
+#
+# Pre-apply gates (NOT in this manifest's scope):
+#   - substrate operator installed on substrate-demo-cluster (#782 alpha
+#     cluster recreate landed via AlexBulankou/a PR #796; ate-system install
+#     pending)
+#   - Snapshot bucket `gs://alexbu-gke-dev-d-substrate-poc1-snapshots/`
+#     created with `roles/storage.objectAdmin` for the ActorTemplate KSA
+#   - Image pushed to GAR (see Dockerfile build pipeline)
+#   - GOOGLE_API_KEY available as a Secret in this namespace
+#   - CRD field names re-verified against the installed ActorTemplate CRD:
+#     `kubectl explain actortemplates` once operator is up
+apiVersion: ate.substrate.dev/v1
+kind: ActorTemplate
+metadata:
+  name: substrate-poc1-agent
+  namespace: substrate-poc1
+spec:
+  image: us-central1-docker.pkg.dev/alexbu-gke-dev-d/substrate-poc1/agent:latest
+  imagePullPolicy: Always
+  env:
+    - name: GOOGLE_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: google-api-key
+          key: GOOGLE_API_KEY
+    - name: PORT
+      value: "8080"
+  ports:
+    - containerPort: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  snapshotsConfig:
+    location: gs://alexbu-gke-dev-d-substrate-poc1-snapshots/agent/
+  # Aggressive idle for PoC demo — actors get suspended quickly so we
+  # observe the resume path in the e2e tests.
+  suspendConfig:
+    idleTimeoutSeconds: 60
+  resumeConfig:
+    resumeTimeoutSeconds: 15
