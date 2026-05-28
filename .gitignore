@@ -1,0 +1,21 @@
+# Binaries built from cmd/
+/cmd/agent/agent
+/cmd/calc-client/calc-client
+bin/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Coverage + test artifacts
+*.out
+coverage.html
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local scratch
+*.local
+*.local.*
