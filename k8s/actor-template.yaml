@@ -47,3 +47,9 @@ spec:
     idleTimeoutSeconds: 60
   resumeConfig:
     resumeTimeoutSeconds: 15
+  # NOTE: no K8s readiness/liveness probes wired against the /health endpoint
+  # in cmd/agent/main.go. Substrate's actor lifecycle (suspend on idle via
+  # snapshotsConfig + CRIU; resume on incoming traffic) supersedes K8s native
+  # readiness for the suspend/resume flow — a probe would either keep the actor
+  # constantly "live" (defeating suspend) or race with the suspend transition.
+  # The /health endpoint stays for ad-hoc kubectl-exec curl during e2e debug.

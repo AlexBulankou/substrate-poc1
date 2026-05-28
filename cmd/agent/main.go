@@ -69,7 +69,7 @@ func (a adkStateAdapter) Set(key string, value any) {
 	// A Set failure means Path 1 (cache-hit on retry) won't fire, but Path 2
 	// dedup still works — degraded, not incorrect. Log so it surfaces.
 	if err := a.s.Set(key, value); err != nil {
-		slog.Warn("state.Set failed", "key", key, "err", err)
+		slog.Warn("state.Set failed", "key", key, "value_type", fmt.Sprintf("%T", value), "err", err)
 	}
 }
 
