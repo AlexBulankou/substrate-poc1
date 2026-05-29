@@ -179,6 +179,57 @@ func TestDirectRoute_DistinctSessions(t *testing.T) {
 	}
 }
 
+// readEvalCount GETs /debug/evalcount and returns the decoded count.
+func readEvalCount(t *testing.T, url string) int64 {
+	t.Helper()
+	resp, err := http.Get(url + "/debug/evalcount")
+	if err != nil {
+		t.Fatalf("get evalcount: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("evalcount status=%d", resp.StatusCode)
+	}
+	var out struct {
+		EvalCount int64 `json:"evalCount"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode evalcount: %v", err)
+	}
+	return out.EvalCount
+}
+
+// TestProductionPath_EvalCountSurface drives the REAL production wiring —
+// httpSessionStore (evalCountingState) + calcDirectHandler + evalCountHandler —
+// and asserts the /debug/evalcount surface reports exactly one real eval for a
+// session driven with a retry. This is the dedup signal the cluster e2e reads
+// after a CRIU suspend/resume to prove state survived. evalCount is a process
+// global, so we assert the DELTA (other tests use a test-local store and don't
+// move it, but the delta form is robust regardless of run order).
+func TestProductionPath_EvalCountSurface(t *testing.T) {
+	store := newHTTPSessionStore()
+	c := newCalculator(store).WithWorkDuration(50 * time.Millisecond)
+	mux := http.NewServeMux()
+	mux.Handle("/v1/calculate", calcDirectHandler(c, store))
+	mux.HandleFunc("/debug/evalcount", evalCountHandler())
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	before := readEvalCount(t, ts.URL)
+
+	// First call evaluates; retry of same session+expr hits the Path-1 cache.
+	if v, _ := postCalc(t, ts.URL, "sid-prod", "6*7"); v != 42 {
+		t.Fatalf("first value=%d, want 42", v)
+	}
+	if v, _ := postCalc(t, ts.URL, "sid-prod", "6*7"); v != 42 {
+		t.Fatalf("retry value=%d, want 42", v)
+	}
+
+	if delta := readEvalCount(t, ts.URL) - before; delta != 1 {
+		t.Errorf("evalCount delta=%d, want 1 (one real eval despite the retry)", delta)
+	}
+}
+
 func TestDirectRoute_MethodNotAllowed(t *testing.T) {
 	ts, _ := newDirectTestServer(50 * time.Millisecond)
 	defer ts.Close()
