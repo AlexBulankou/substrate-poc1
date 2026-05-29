@@ -1,0 +1,28 @@
+# In-cluster HTTP driver for the cluster-mode e2e (test/e2e-cluster/run.sh).
+#
+# atenet-router and per-actor DNS (<actor>.actors.resources.substrate.ate.dev)
+# are cluster-internal only — unreachable from outside substrate-demo-cluster.
+# So the e2e drives /v1/calculate and /debug/evalcount from this pod, which lives
+# in-cluster, while the orchestration (create/suspend actor, assertions) runs
+# wherever you invoke run.sh. A plain long-lived curl pod; run.sh applies it if
+# absent and reuses it across runs.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: poc1-e2e-curl
+  namespace: substrate-poc1
+  labels:
+    app: poc1-e2e-curl
+spec:
+  restartPolicy: Always
+  containers:
+    - name: curl
+      image: curlimages/curl:8.10.1
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

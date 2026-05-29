@@ -49,19 +49,34 @@ make demo    # local e2e: real calc-client over real TCP through all 4 cases
 
 The `evalCount == 1` assertions (cases 2-4) are the dedup proof: the work ran exactly once no matter how the client retried. The test server is a faithful stand-in for the actor's direct-tool endpoint (one long-lived `Calculator` + per-session state, keyed on the `Host` header the client sets to the sessionID); `cmd/agent` now exposes the matching `/v1/calculate` route (#10) and `cmd/agent/direct_route_test.go` asserts the same `evalCount == 1` signal against the real route.
 
-### Cluster-mode (gated on operator install — `AlexBulankou/a` #782)
+### Cluster-mode
 
-`make demo-cluster` deploys the agent ActorTemplate to `substrate-demo-cluster` and runs the client against live atenet, additionally validating substrate's same-actorID-same-process routing and the CRIU smoke trio. **Blocked** until the substrate ate-system install lands (alpha-API gap on GKE — `AlexBulankou/a` #782/#808). Remaining pre-req beyond #782:
+`make demo-cluster` ([`test/e2e-cluster/`](./test/e2e-cluster/)) runs the in-cluster suspend/resume e2e against `substrate-demo-cluster`. It proves the headline invariant: the calculate-tool dedup state — **exactly one real evaluation despite client retries** — *survives a CRIU suspend/resume*, observed live via `/debug/evalcount` on a real actor behind atenet.
 
-- Snapshot bucket + `GOOGLE_API_KEY` Secret + GAR image push (see [`k8s/actor-template.yaml`](./k8s/actor-template.yaml) pre-apply gates).
+The assertion chain:
 
-The `/v1/calculate` direct-tool route the client POSTs to (`{"expression"}` → `{"value"}`, sessionID in `Host`) is implemented (#10) — cluster-mode is one unblock (#782) away, not two.
+1. Create an actor from the `substrate-poc1-agent` ActorTemplate (starts SUSPENDED).
+2. Drive `6*7` → auto-resume from golden snapshot; assert `value==42`, `evalCount==1`.
+3. Retry the calc 3× → assert `evalCount` stays `1` (Path-1 cache dedup).
+4. `SuspendActor` (CRIU checkpoint) → re-drive `6*7` (resume from the actor's own CRIU snapshot).
+5. Assert `value==42` and `evalCount` is **still `1`** — the dedup state survived suspend/resume.
+
+`atenet-router` and the per-actor DNS name (`<actor>.actors.resources.substrate.ate.dev`) resolve cluster-internal only, so the e2e drives HTTP from an in-cluster curl pod ([`curl-driver.yaml`](./test/e2e-cluster/curl-driver.yaml)) while orchestration runs wherever you invoke it.
+
+Prereqs:
+
+- `KUBECONFIG` points at `substrate-demo-cluster` (admin) — e.g. `gcloud container clusters get-credentials substrate-demo-cluster --region us-central1 --project alexbu-gke-dev-d`.
+- `KUBECTL_ATE` = path to the `kubectl-ate` binary (default: `kubectl-ate` on PATH). Suspend/resume go through the gRPC CRIU workflow, so plain `kubectl` cannot drive them.
+- ActorTemplate `substrate-poc1-agent` is Ready — [`k8s/actor-template.yaml`](./k8s/actor-template.yaml) applied with the golden snapshot built on an agent image that serves `/debug/evalcount` (#17). Snapshot bucket + GAR image push are the manifest's documented pre-apply gates.
+- The single-replica WorkerPool's worker must be free — clean up any leftover actors before a run (the script logs a `500 "no free workers available"` body if it isn't).
+
+The substrate ate-system install (`AlexBulankou/a` #782/#808) and the keyless agent boot are DONE; cluster-mode is live, not gated.
 
 ## Status
 
 **IMPL ACTIVE.** Tracking issues: [#1 umbrella](https://github.com/AlexBulankou/substrate-poc1/issues/1), [#2 agent](https://github.com/AlexBulankou/substrate-poc1/issues/2) (a4s2), [#4 client+tool](https://github.com/AlexBulankou/substrate-poc1/issues/4) (a4s1), [#5 joint integration](https://github.com/AlexBulankou/substrate-poc1/issues/5).
 
-E2E execution gated on substrate-operator install (alex pick `AlexBulankou/a` #782). Impl + unit tests parallelize regardless.
+Both local-mode (`make demo`) and cluster-mode (`make demo-cluster`) e2e are live: the cluster e2e proves the dedup invariant survives a CRIU suspend/resume on `substrate-demo-cluster`.
 
 ## Contributing
 
