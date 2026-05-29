@@ -47,14 +47,15 @@ make demo    # local e2e: real calc-client over real TCP through all 4 cases
 | 3 Path 2 | conn, *during* work | retry joins singleflight, both wake together, **1** evaluation |
 | 4 Concurrent | nothing (2 clients race) | singleflight collapses to **1** evaluation |
 
-The `evalCount == 1` assertions (cases 2-4) are the dedup proof: the work ran exactly once no matter how the client retried. The test server is a faithful stand-in for the actor's future direct-tool endpoint (one long-lived `Calculator` + per-session state, keyed on the `Host` header the client sets to the sessionID).
+The `evalCount == 1` assertions (cases 2-4) are the dedup proof: the work ran exactly once no matter how the client retried. The test server is a faithful stand-in for the actor's direct-tool endpoint (one long-lived `Calculator` + per-session state, keyed on the `Host` header the client sets to the sessionID); `cmd/agent` now exposes the matching `/v1/calculate` route (#10) and `cmd/agent/direct_route_test.go` asserts the same `evalCount == 1` signal against the real route.
 
 ### Cluster-mode (gated on operator install — `AlexBulankou/a` #782)
 
-`make demo-cluster` deploys the agent ActorTemplate to `substrate-demo-cluster` and runs the client against live atenet, additionally validating substrate's same-actorID-same-process routing and the CRIU smoke trio. **Blocked** until the substrate ate-system install lands (alpha-API gap on GKE — `AlexBulankou/a` #782/#808). Two known pre-reqs beyond #782:
+`make demo-cluster` deploys the agent ActorTemplate to `substrate-demo-cluster` and runs the client against live atenet, additionally validating substrate's same-actorID-same-process routing and the CRIU smoke trio. **Blocked** until the substrate ate-system install lands (alpha-API gap on GKE — `AlexBulankou/a` #782/#808). Remaining pre-req beyond #782:
 
-- The agent (`cmd/agent`) currently serves only the ADK REST surface at `/api/`; cluster-mode needs a `/v1/calculate` direct-tool route matching the client's contract (`{"expression"}` → `{"value"}`). Tracked as a follow-up so the local test double and the real actor stay in sync.
 - Snapshot bucket + `GOOGLE_API_KEY` Secret + GAR image push (see [`k8s/actor-template.yaml`](./k8s/actor-template.yaml) pre-apply gates).
+
+The `/v1/calculate` direct-tool route the client POSTs to (`{"expression"}` → `{"value"}`, sessionID in `Host`) is implemented (#10) — cluster-mode is one unblock (#782) away, not two.
 
 ## Status
 
