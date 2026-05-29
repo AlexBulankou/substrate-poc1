@@ -2,6 +2,7 @@ package calc
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -281,4 +282,70 @@ func (s *countingState) Get(k string) (any, bool) { return s.inner.Get(k) }
 func (s *countingState) Set(k string, v any) {
 	s.evalCount.Add(1)
 	s.inner.Set(k, v)
+}
+
+// TestCalculate_Path1_SerializedCacheHit asserts the Path-1 cache read tolerates
+// the JSON-round-tripped forms an int takes on a serialized/persistent ADK
+// session backend (float64, json.Number, int64) — returning the cached value
+// WITHOUT re-running the work function. The pre-fix int-only assertion fell
+// through to Path-2 here, silently re-executing the (non-idempotent in the real
+// target) tool. evalCount is seeded via the inner store so the seed itself does
+// not register as work; a Path-1 hit must leave it at 0.
+func TestCalculate_Path1_SerializedCacheHit(t *testing.T) {
+	cases := []struct {
+		name   string
+		cached any
+	}{
+		{"float64 (encoding/json default)", float64(15)},
+		{"json.Number (decoder UseNumber)", json.Number("15")},
+		{"int64", int64(15)},
+		{"int (in-memory backend)", 15},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var evalCount atomic.Int32
+			state := &countingState{inner: newMapState(), evalCount: &evalCount}
+			// Seed the cache directly on the inner store (bypasses the counter).
+			state.inner.Set("calc:7+8", c.cached)
+
+			calc := newTestCalc(5 * time.Second) // long: a fall-through to Path 2 would block
+			ctx := ctxWith("sid-serialized", state)
+
+			start := time.Now()
+			got, err := calc.Calculate(ctx, CalculateArgs{Expression: "7+8"})
+			elapsed := time.Since(start)
+
+			if err != nil {
+				t.Fatalf("Calculate: %v", err)
+			}
+			if got.Value != 15 {
+				t.Errorf("Value = %d, want 15", got.Value)
+			}
+			if n := evalCount.Load(); n != 0 {
+				t.Errorf("evalCount = %d, want 0 — work re-executed instead of Path-1 cache hit", n)
+			}
+			if elapsed > 100*time.Millisecond {
+				t.Errorf("cache hit took %v — fell through to Path-2 work", elapsed)
+			}
+		})
+	}
+}
+
+// TestCalculate_Path1_AnomalousCacheType asserts a present-but-unconvertible
+// cached value surfaces an explicit error rather than silently re-executing.
+func TestCalculate_Path1_AnomalousCacheType(t *testing.T) {
+	var evalCount atomic.Int32
+	state := &countingState{inner: newMapState(), evalCount: &evalCount}
+	state.inner.Set("calc:7+8", "not-a-number") // string: neither int nor JSON-numeric
+
+	calc := newTestCalc(5 * time.Second)
+	ctx := ctxWith("sid-anomalous", state)
+
+	_, err := calc.Calculate(ctx, CalculateArgs{Expression: "7+8"})
+	if err == nil {
+		t.Fatalf("expected error on unconvertible cached type, got nil")
+	}
+	if n := evalCount.Load(); n != 0 {
+		t.Errorf("evalCount = %d, want 0 — anomaly must not trigger re-execute", n)
+	}
 }
