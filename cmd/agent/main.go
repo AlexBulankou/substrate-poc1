@@ -16,10 +16,11 @@
 // Both surfaces drive the SAME long-lived pkg/calc.Calculator, so the
 // singleflight.Group + per-session cache dedup is shared across them.
 //
-// Required environment:
-//   - GOOGLE_API_KEY   — for the Gemini model (substrate ActorTemplate env)
-//
-// Optional:
+// Environment:
+//   - GOOGLE_API_KEY   — optional. When set, the LLM-driven /api/ surface is
+//     mounted (Gemini model). When absent, the agent boots serving only
+//     /v1/calculate + /health — the contract the cluster suspend/resume PoC
+//     exercises, so no Gemini key is needed for that proof.
 //   - PORT             — HTTP listen port (default 8080)
 package main
 
@@ -223,29 +224,15 @@ func calcDirectHandler(c *calc.Calculator, store sessionStateProvider) http.Hand
 	}
 }
 
-func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
-	apiKey := os.Getenv("GOOGLE_API_KEY")
-	if apiKey == "" {
-		slog.Error("GOOGLE_API_KEY is required")
-		os.Exit(1)
-	}
-
-	ctx := context.Background()
-
+// mountADKSurface wires the LLM-driven ADK REST surface (/api/) around the
+// shared Calculator and registers it on mux. Split out of main() so the keyless
+// boot path skips all Gemini construction entirely. Returns an error instead of
+// os.Exit so main() owns process lifecycle.
+func mountADKSurface(ctx context.Context, mux *http.ServeMux, c *calc.Calculator, apiKey string) error {
 	model, err := gemini.NewModel(ctx, defaultModel, &genai.ClientConfig{APIKey: apiKey})
 	if err != nil {
-		slog.Error("create gemini model", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("create gemini model: %w", err)
 	}
-
-	// Single long-lived Calculator — the singleflight.Group state across all
-	// invocations is what dedupes concurrent same-session callers. A fresh
-	// Calculator per invocation would defeat Path 2 (in-flight retry). The
-	// httpStore backs the /v1/calculate direct route's per-session state.
-	httpStore := newHTTPSessionStore()
-	c := newCalculator(httpStore)
 
 	handler := func(tc tool.Context, args calc.CalculateArgs) (calc.CalculateResult, error) {
 		return c.Calculate(tc, args)
@@ -256,8 +243,7 @@ func main() {
 		Description: toolDescription,
 	}, handler)
 	if err != nil {
-		slog.Error("register calculate tool", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("register calculate tool: %w", err)
 	}
 
 	a, err := llmagent.New(llmagent.Config{
@@ -268,8 +254,7 @@ func main() {
 		Tools:       []tool.Tool{calcTool},
 	})
 	if err != nil {
-		slog.Error("create llmagent", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("create llmagent: %w", err)
 	}
 
 	restServer, err := adkrest.NewServer(adkrest.ServerConfig{
@@ -278,17 +263,48 @@ func main() {
 		SSEWriteTimeout: 120 * time.Second,
 	})
 	if err != nil {
-		slog.Error("create rest server", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("create rest server: %w", err)
 	}
 
-	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", restServer))
+	return nil
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
+	ctx := context.Background()
+
+	// Single long-lived Calculator — the singleflight.Group state across all
+	// invocations is what dedupes concurrent same-session callers. A fresh
+	// Calculator per invocation would defeat Path 2 (in-flight retry). The
+	// httpStore backs the /v1/calculate direct route's per-session state.
+	httpStore := newHTTPSessionStore()
+	c := newCalculator(httpStore)
+
+	mux := http.NewServeMux()
 	mux.Handle("/v1/calculate", calcDirectHandler(c, httpStore))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
+
+	// The ADK /api/ surface is the only Gemini consumer. The suspend/resume
+	// dedup PoC drives /v1/calculate exclusively, so when GOOGLE_API_KEY is
+	// absent we boot WITHOUT /api/ — the actor still serves the exact contract
+	// the cluster client + CRIU smoke exercise. Same stub-philosophy as the
+	// counter-image scenario-6 probe: prove the substrate behavior (per-session
+	// routing, suspend/resume, dedup) without dragging in the LLM dependency.
+	routes := "/v1/calculate,/health"
+	if apiKey := os.Getenv("GOOGLE_API_KEY"); apiKey != "" {
+		if err := mountADKSurface(ctx, mux, c, apiKey); err != nil {
+			slog.Error("mount ADK /api/ surface", "err", err)
+			os.Exit(1)
+		}
+		routes = "/api/," + routes
+	} else {
+		slog.Warn("GOOGLE_API_KEY absent — /api/ disabled; serving direct-tool route only (suspend/resume PoC mode)")
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -296,7 +312,7 @@ func main() {
 	}
 	addr := ":" + port
 
-	slog.Info("agent ready", "addr", addr, "tool", toolName, "agent", agentName, "routes", "/api/,/v1/calculate,/health")
+	slog.Info("agent ready", "addr", addr, "tool", toolName, "agent", agentName, "routes", routes)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
