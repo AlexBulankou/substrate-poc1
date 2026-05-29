@@ -49,6 +49,7 @@ package calc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -130,9 +131,30 @@ func (c *Calculator) Calculate(ctx context.Context, args CalculateArgs) (Calcula
 	cacheKey := "calc:" + key
 
 	// Path 1: post-completion retry — state cache hit returns immediately.
+	//
+	// The cached value is read back through whatever session backend ADK is
+	// configured with. The in-memory session service round-trips a Go int
+	// unchanged, but any serialized/persistent backend marshals through JSON,
+	// where an int deserializes as float64 (or json.Number under a
+	// decoder with UseNumber). A present-but-unconvertible value is an
+	// anomaly, not a miss: returning it as an explicit error prevents the
+	// dedup from silently falling through to re-execute a non-idempotent tool.
 	if v, ok := state.Get(cacheKey); ok {
-		if r, ok := v.(int); ok {
+		switch r := v.(type) {
+		case int:
 			return CalculateResult{Value: r}, nil
+		case int64:
+			return CalculateResult{Value: int(r)}, nil
+		case float64:
+			return CalculateResult{Value: int(r)}, nil
+		case json.Number:
+			n, convErr := r.Int64()
+			if convErr != nil {
+				return CalculateResult{}, fmt.Errorf("calc: cached value %q not int-convertible: %w", r, convErr)
+			}
+			return CalculateResult{Value: int(n)}, nil
+		default:
+			return CalculateResult{}, fmt.Errorf("calc: cached value for %q has unexpected type %T", cacheKey, v)
 		}
 	}
 
