@@ -29,6 +29,33 @@ Neither ADK Go nor ADK Python ships built-in tool-result memoization keyed by se
 
 Plus a CRIU smoke trio validating that `sync.Mutex`+map, blocked goroutines, and Go monotonic clock all survive substrate's checkpoint/restore.
 
+## Running the harness
+
+### Local-mode (runnable now — no cluster, no Gemini, no operator)
+
+```
+make test    # pkg/calc unit tests (fast, hermetic)
+make demo    # local e2e: real calc-client over real TCP through all 4 cases
+```
+
+`make demo` ([`test/e2e/`](./test/e2e/)) drives the **real** `calc-client` binary — with its real conn-drop transport — against a test HTTP server that wraps the **real** `pkg/calc.Calculator`. It exercises the dedup invariant end-to-end over a real TCP socket, printing a per-case timeline:
+
+| Case | What drops | Asserts |
+|---|---|---|
+| 1 Happy | nothing | result after one work-duration |
+| 2 Path 1 | conn, *after* result read | retry returns cached value, **1** evaluation |
+| 3 Path 2 | conn, *during* work | retry joins singleflight, both wake together, **1** evaluation |
+| 4 Concurrent | nothing (2 clients race) | singleflight collapses to **1** evaluation |
+
+The `evalCount == 1` assertions (cases 2-4) are the dedup proof: the work ran exactly once no matter how the client retried. The test server is a faithful stand-in for the actor's future direct-tool endpoint (one long-lived `Calculator` + per-session state, keyed on the `Host` header the client sets to the sessionID).
+
+### Cluster-mode (gated on operator install — `AlexBulankou/a` #782)
+
+`make demo-cluster` deploys the agent ActorTemplate to `substrate-demo-cluster` and runs the client against live atenet, additionally validating substrate's same-actorID-same-process routing and the CRIU smoke trio. **Blocked** until the substrate ate-system install lands (alpha-API gap on GKE — `AlexBulankou/a` #782/#808). Two known pre-reqs beyond #782:
+
+- The agent (`cmd/agent`) currently serves only the ADK REST surface at `/api/`; cluster-mode needs a `/v1/calculate` direct-tool route matching the client's contract (`{"expression"}` → `{"value"}`). Tracked as a follow-up so the local test double and the real actor stay in sync.
+- Snapshot bucket + `GOOGLE_API_KEY` Secret + GAR image push (see [`k8s/actor-template.yaml`](./k8s/actor-template.yaml) pre-apply gates).
+
 ## Status
 
 **IMPL ACTIVE.** Tracking issues: [#1 umbrella](https://github.com/AlexBulankou/substrate-poc1/issues/1), [#2 agent](https://github.com/AlexBulankou/substrate-poc1/issues/2) (a4s2), [#4 client+tool](https://github.com/AlexBulankou/substrate-poc1/issues/4) (a4s1), [#5 joint integration](https://github.com/AlexBulankou/substrate-poc1/issues/5).
