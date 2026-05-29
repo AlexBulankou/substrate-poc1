@@ -6,9 +6,11 @@
 #                 4-case dedup matrix (happy / Path1 / Path2 / concurrent)
 #   make build  — compile the agent + calc-client binaries to bin/
 #
-# Cluster-mode (gated on AlexBulankou/a #782 ate-system install):
-#   make demo-cluster — deploy ActorTemplate to substrate-demo-cluster and run
-#                       the client against live atenet. See README "Cluster-mode".
+# Cluster-mode (live on substrate-demo-cluster; ate-system install is #782-DONE):
+#   make demo-cluster — run the in-cluster suspend/resume e2e: create an actor,
+#                       drive 6*7 via atenet, assert the dedup invariant
+#                       (evalCount==1) SURVIVES a CRIU suspend/resume.
+#                       Prereqs + KUBECONFIG/KUBECTL_ATE: see README "Cluster-mode".
 
 GO ?= go
 BIN := bin
@@ -29,9 +31,7 @@ build:
 	$(GO) build -o $(BIN)/calc-client ./cmd/calc-client
 
 demo-cluster:
-	@echo "demo-cluster is gated on the substrate ate-system install (AlexBulankou/a #782)."
-	@echo "See README.md -> 'E2E harness' -> 'Cluster-mode' for the manual runbook."
-	@exit 1
+	bash test/e2e-cluster/run.sh
 
 clean:
 	rm -rf $(BIN)

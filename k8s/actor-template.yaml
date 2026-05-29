@@ -48,7 +48,7 @@ metadata:
 spec:
   containers:
     - name: agent
-      image: us-central1-docker.pkg.dev/alexbu-gke-dev-d/substrate-poc1/agent@sha256:d2c15c7d66049f9d40830f674aee3ab18cb58679bf046f949a38f792768509e5
+      image: us-central1-docker.pkg.dev/alexbu-gke-dev-d/substrate-poc1/agent@sha256:6ef924f73bce37d38e7d5ed8b0568601ccf27497040d629c7a9006d597ea8e5f
       command:
         - /agent
       env:
