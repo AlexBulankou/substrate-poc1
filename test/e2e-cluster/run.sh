@@ -89,7 +89,27 @@ read_evalcount() {
     | sed -n 's/.*"evalCount":\([0-9]*\).*/\1/p'
 }
 
-# --- 0. ensure the in-cluster HTTP driver pod is Ready ---
+# Suspend+delete any leftover poc1-e2e-* actor from a prior run that died
+# before its cleanup trap fired (e.g. a pod respawn SIGKILLs us mid-run). Such
+# an orphan stays SUSPENDED but still pins the single-replica WorkerPool's only
+# worker slot, so the next run's create/resume fails with a 500 "no free
+# workers available". Sweeping before we create ours guarantees a free slot.
+# Best-effort: a get/suspend/delete hiccup must never fail the run.
+# Column layout of `kubectl-ate get actor`: $1=NAMESPACE $3=ID.
+sweep_stale_actors() {
+  local stale a
+  stale=$("$KUBECTL_ATE" get actor 2>/dev/null \
+    | awk -v ns="$NS" '$1==ns && $3 ~ /^poc1-e2e-/ {print $3}') || return 0
+  [ -n "$stale" ] || { info "no stale poc1-e2e-* actors to sweep"; return 0; }
+  for a in $stale; do
+    info "sweeping stale actor $a (suspend+delete)"
+    "$KUBECTL_ATE" suspend actor "$a" >/dev/null 2>&1 || true
+    "$KUBECTL_ATE" delete actor "$a" >/dev/null 2>&1 || true
+  done
+}
+
+# --- 0. sweep stale actors, then ensure the in-cluster HTTP driver pod is Ready ---
+sweep_stale_actors
 if ! kubectl get pod "$DRIVER" -n "$NS" >/dev/null 2>&1; then
   info "creating driver pod $DRIVER"
   kubectl apply -f "$SCRIPT_DIR/curl-driver.yaml" >/dev/null
