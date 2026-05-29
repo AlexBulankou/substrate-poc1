@@ -1,55 +1,68 @@
-# ActorTemplate for substrate-poc1 agent.
+# substrate-poc1 cluster-mode manifests (ate.dev/v1alpha1).
 #
-# Substrate's operator (`agent-substrate/substrate`) consumes this CRD and
-# spawns one Actor pod per session-id on first request, suspending idle
-# actors via runsc + CRIU checkpoint/restore (snapshotsConfig location).
+# Substrate's operator consumes WorkerPool + ActorTemplate and, on first
+# request to a session-id, spawns one gVisor-sandboxed Actor pod, suspending
+# idle actors via runsc + CRIU checkpoint/restore (snapshotsConfig.location)
+# and resuming them on the next request. The suspend/resume cycle is what the
+# PoC's dedup invariant (evalCount == 1 across client retries) is proven on.
+#
+# Field shapes verified live against the installed CRDs on substrate-demo-cluster
+# (`kubectl explain actortemplates.spec --recursive`, group ate.dev/v1alpha1)
+# and against the running mux-structural / ate-demo-counter examples.
 #
 # Pre-apply gates (NOT in this manifest's scope):
-#   - substrate operator installed on substrate-demo-cluster (#782 alpha
-#     cluster recreate landed via AlexBulankou/a PR #796; ate-system install
-#     pending)
-#   - Snapshot bucket `gs://alexbu-gke-dev-d-substrate-poc1-snapshots/`
-#     created with `roles/storage.objectAdmin` for the ActorTemplate KSA
-#   - Image pushed to GAR (see Dockerfile build pipeline)
-#   - GOOGLE_API_KEY available as a Secret in this namespace
-#   - CRD field names re-verified against the installed ActorTemplate CRD:
-#     `kubectl explain actortemplates` once operator is up
-apiVersion: ate.substrate.dev/v1
+#   - ate-system operator running on substrate-demo-cluster (#782 — DONE, the
+#     GKE-Standard rebuild via AlexBulankou/a PR #1053 resolved the alpha-API
+#     CTB/PCR gap; ate-api-server/ate-controller/atelet/atenet-router up).
+#   - Snapshot bucket gs://alexbu-gke-dev-d-substrate-poc1-snapshots created
+#     (#460 — DONE) with object-admin for the actor's runtime identity.
+#   - Agent image pushed to GAR (#461): the keyless-boot build serves
+#     /v1/calculate + /health with NO GOOGLE_API_KEY (PR #14). The /api/ LLM
+#     surface stays unmounted in cluster-mode — the dedup proof needs no Gemini.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: substrate-poc1
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: poc1-pool
+  namespace: substrate-poc1
+spec:
+  # ko:// form — the operator's ko resolver pins it to the GAR ateom-gvisor
+  # digest at apply time (same resolution the live mux-pool underwent).
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  replicas: 1
+---
+apiVersion: ate.dev/v1alpha1
 kind: ActorTemplate
 metadata:
   name: substrate-poc1-agent
   namespace: substrate-poc1
 spec:
-  image: us-central1-docker.pkg.dev/alexbu-gke-dev-d/substrate-poc1/agent:latest
-  imagePullPolicy: Always
-  env:
-    - name: GOOGLE_API_KEY
-      valueFrom:
-        secretKeyRef:
-          name: google-api-key
-          key: GOOGLE_API_KEY
-    - name: PORT
-      value: "8080"
-  ports:
-    - containerPort: 8080
-  resources:
-    requests:
-      cpu: 100m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
+  containers:
+    - name: agent
+      image: us-central1-docker.pkg.dev/alexbu-gke-dev-d/substrate-poc1/agent@sha256:d2c15c7d66049f9d40830f674aee3ab18cb58679bf046f949a38f792768509e5
+      command:
+        - /agent
+      env:
+        - name: PORT
+          value: "8080"
+      ports:
+        - name: http
+          containerPort: 8080
+  pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  runsc:
+    amd64:
+      url: gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc
+      sha256Hash: a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63
+    arm64:
+      url: gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc
+      sha256Hash: 1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9
   snapshotsConfig:
     location: gs://alexbu-gke-dev-d-substrate-poc1-snapshots/agent/
-  # Aggressive idle for PoC demo — actors get suspended quickly so we
-  # observe the resume path in the e2e tests.
-  suspendConfig:
-    idleTimeoutSeconds: 60
-  resumeConfig:
-    resumeTimeoutSeconds: 15
-  # NOTE: no K8s readiness/liveness probes wired against the /health endpoint
-  # in cmd/agent/main.go. Substrate's actor lifecycle (suspend on idle via
-  # snapshotsConfig + CRIU; resume on incoming traffic) supersedes K8s native
-  # readiness for the suspend/resume flow — a probe would either keep the actor
-  # constantly "live" (defeating suspend) or race with the suspend transition.
-  # The /health endpoint stays for ad-hoc kubectl-exec curl during e2e debug.
+  workerPoolRef:
+    name: poc1-pool
+    namespace: substrate-poc1
