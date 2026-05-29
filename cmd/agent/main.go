@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/genai"
@@ -132,6 +133,29 @@ func (s *mapState) Set(k string, v any) {
 	s.m[k] = v
 }
 
+// evalCount counts real tool evaluations process-wide. It bumps on
+// calc.StateStore.Set, which the Calculator calls exactly once per real eval
+// inside the singleflight leader — cache hits (Path 1) and in-flight joiners
+// (Path 2 followers) never Set. This is the same dedup signal pkg/calc's own
+// countingState test asserts against. Living in process memory means the count
+// SURVIVES a CRIU suspend/resume: reading /debug/evalcount after resume proves
+// both that the per-session state cache survived the checkpoint AND that the
+// dedup invariant held across the connection drop (evalCount==1 for a session
+// driven with retries). The committed cluster e2e (suspend→resume→re-drive)
+// reads it to assert state survived.
+var evalCount atomic.Int64
+
+// evalCountingState wraps a calc.StateStore and bumps the process-global
+// evalCount on each Set — once per real eval (see evalCount). Mirrors the
+// countingState used in pkg/calc's dedup tests.
+type evalCountingState struct{ inner calc.StateStore }
+
+func (s evalCountingState) Get(k string) (any, bool) { return s.inner.Get(k) }
+func (s evalCountingState) Set(k string, v any) {
+	evalCount.Add(1)
+	s.inner.Set(k, v)
+}
+
 // sessionStateProvider hands out one persistent calc.StateStore per sessionID.
 // Small interface (one impl: httpSessionStore) so the direct-route handler is
 // testable with an eval-counting store, matching the e2e harness's countingState.
@@ -158,7 +182,10 @@ func (s *httpSessionStore) get(sid string) calc.StateStore {
 		st = &mapState{m: map[string]any{}}
 		s.byID[sid] = st
 	}
-	return st
+	// Wrap so each real eval bumps the process-global evalCount. The inner
+	// *mapState (cached in byID) is what persists per session; the wrapper is
+	// a stateless view over it plus the shared counter.
+	return evalCountingState{inner: st}
 }
 
 // newCalculator builds the single long-lived Calculator. Its extractors are
@@ -221,6 +248,18 @@ func calcDirectHandler(c *calc.Calculator, store sessionStateProvider) http.Hand
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(calc.CalculateResult{Value: res.Value})
+	}
+}
+
+// evalCountHandler builds the /debug/evalcount handler. It reports the
+// process-global real-eval count as {"evalCount": <n>}. Split out of main() so
+// it's testable. The cluster e2e drives /v1/calculate through atenet, then reads
+// this on the SAME actor (Host=actorID) before/after a CRIU suspend/resume to
+// assert the dedup invariant (one eval per session+expr) and that state survived.
+func evalCountHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]int64{"evalCount": evalCount.Load()})
 	}
 }
 
@@ -288,6 +327,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
+	mux.HandleFunc("/debug/evalcount", evalCountHandler())
 
 	// The ADK /api/ surface is the only Gemini consumer. The suspend/resume
 	// dedup PoC drives /v1/calculate exclusively, so when GOOGLE_API_KEY is
@@ -295,7 +335,7 @@ func main() {
 	// the cluster client + CRIU smoke exercise. Same stub-philosophy as the
 	// counter-image scenario-6 probe: prove the substrate behavior (per-session
 	// routing, suspend/resume, dedup) without dragging in the LLM dependency.
-	routes := "/v1/calculate,/health"
+	routes := "/v1/calculate,/health,/debug/evalcount"
 	if apiKey := os.Getenv("GOOGLE_API_KEY"); apiKey != "" {
 		if err := mountADKSurface(ctx, mux, c, apiKey); err != nil {
 			slog.Error("mount ADK /api/ surface", "err", err)
