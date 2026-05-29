@@ -24,12 +24,12 @@
 //   - CRIU checkpoint/restore preserving the dedup primitives (the §4 smoke
 //     trio). Gated on #782 + runsc.
 //
-// The test server is a faithful stand-in for the agent's future direct-tool
-// endpoint: one long-lived Calculator (shared singleflight.Group) + per-session
-// state, keyed on the Host header the client sets to the sessionID. NOTE: the
-// merged cmd/agent (a4s2 slice) does not yet expose a /v1/calculate direct-tool
-// route — it serves only the ADK REST surface at /api/. Cluster-mode needs that
-// route added; tracked as a follow-up so the test double and the real actor
+// The test server is a faithful stand-in for the agent's direct-tool endpoint:
+// one long-lived Calculator (shared singleflight.Group) + per-session state,
+// keyed on the Host header the client sets to the sessionID. cmd/agent now
+// exposes the matching /v1/calculate route (#10), driving the same Calculator;
+// cmd/agent/direct_route_test.go asserts the same evalCount==1 dedup signal
+// directly against that real route, so the stand-in here and the real actor
 // stay in sync.
 //
 // Run: `go test -tags e2e -v ./test/e2e` (or `make demo`).
