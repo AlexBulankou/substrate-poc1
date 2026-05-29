@@ -31,9 +31,13 @@ metadata:
   name: poc1-pool
   namespace: substrate-poc1
 spec:
-  # ko:// form — the operator's ko resolver pins it to the GAR ateom-gvisor
-  # digest at apply time (same resolution the live mux-pool underwent).
-  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  # Pre-resolved GAR digest. The operator does NOT run a ko resolver at
+  # reconcile — it passes ateomImage through to the ateom Deployment as-is,
+  # so a ko:// URL lands verbatim and the pod fails InvalidImageName. The
+  # ko:// → digest resolution is the deployer's job (ko CLI / install tool);
+  # this is the same resolved ateom-gvisor digest the live mux-pool and
+  # ate-demo-counter pools run.
+  ateomImage: gcr.io/alexbu-gke-dev-d/ate-images/ateom-gvisor-715889664656de67e44382a8d6ab981d@sha256:09fcdd6b74b0c8fa7aeb0581991f02d55ff10c1ce4b59b8b5458f5c1a545199c
   replicas: 1
 ---
 apiVersion: ate.dev/v1alpha1
